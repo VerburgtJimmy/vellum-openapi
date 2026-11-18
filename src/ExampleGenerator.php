@@ -1,0 +1,187 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Vellum\OpenApi;
+
+/**
+ * An example value for a schema, preferring what the spec says over anything
+ * invented. A spec's own example is the one that has been looked at by a
+ * human; a generated one only has to be shaped right.
+ */
+final class ExampleGenerator
+{
+    private const MAX_DEPTH = 6;
+
+    /**
+     * @param  array<string, mixed>  $media  A media type object.
+     */
+    public static function forMedia(array $media): mixed
+    {
+        return self::declared($media) ?? self::fromSchema(Stream::schema($media));
+    }
+
+    /**
+     * The example a media type or a parameter gives for itself, or null when
+     * it gives none: its example, or the first of its named examples.
+     *
+     * @param  array<string, mixed>  $object
+     */
+    public static function declared(array $object): mixed
+    {
+        if (array_key_exists('example', $object)) {
+            return $object['example'];
+        }
+
+        foreach (is_array($object['examples'] ?? null) ? $object['examples'] : [] as $example) {
+            // dataValue is OpenAPI 3.2's name for the value as data, beside
+            // serializedValue for it as sent, which a sample does not need.
+            if (is_array($example) && array_key_exists('dataValue', $example)) {
+                return $example['dataValue'];
+            }
+
+            if (is_array($example) && array_key_exists('value', $example)) {
+                return $example['value'];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $schema
+     */
+    public static function fromSchema(array $schema, int $depth = 0): mixed
+    {
+        if ($depth > self::MAX_DEPTH || SchemaView::isRecursive($schema)) {
+            return null;
+        }
+
+        if (array_key_exists('example', $schema)) {
+            return $schema['example'];
+        }
+
+        if (array_key_exists('default', $schema)) {
+            return $schema['default'];
+        }
+
+        if (array_key_exists('const', $schema)) {
+            return $schema['const'];
+        }
+
+        // A string that holds a document: what it holds, as the string it is.
+        if (is_array($schema['contentSchema'] ?? null)) {
+            $held = self::fromSchema($schema['contentSchema'], $depth + 1);
+
+            return is_string($held) ? $held : json_encode($held, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        }
+
+        $enum = SchemaView::enumValues($schema);
+
+        if ($enum !== []) {
+            return $enum[0];
+        }
+
+        $variants = SchemaView::variants($schema);
+
+        if ($variants !== []) {
+            $example = self::fromSchema($variants[0]['schema'], $depth + 1);
+            $discriminator = SchemaView::discriminator($schema);
+
+            // The example says which variant it is, as a real value would.
+            if (is_array($example) && $discriminator !== null && isset($discriminator['values'][0])) {
+                $example[$discriminator['property']] = $discriminator['values'][0];
+            }
+
+            return $example;
+        }
+
+        return self::byType($schema, $depth);
+    }
+
+    /**
+     * @param  array<string, mixed>  $schema
+     */
+    private static function byType(array $schema, int $depth): mixed
+    {
+        $type = $schema['type'] ?? null;
+        $types = is_array($type) ? array_values(array_filter($type, is_string(...))) : [is_string($type) ? $type : null];
+        $primary = null;
+
+        foreach ($types as $candidate) {
+            if ($candidate !== null && $candidate !== 'null') {
+                $primary = $candidate;
+                break;
+            }
+        }
+
+        $primary ??= is_array($schema['properties'] ?? null) ? 'object' : ($schema['items'] ?? null ? 'array' : 'string');
+
+        return match ($primary) {
+            'integer' => 0,
+            'number' => 0,
+            'boolean' => true,
+            'array' => self::arrayExample($schema, $depth),
+            'object' => self::objectExample($schema, $depth),
+            'null' => null,
+            default => self::stringExample($schema),
+        };
+    }
+
+    /**
+     * @param  array<string, mixed>  $schema
+     * @return list<mixed>
+     */
+    private static function arrayExample(array $schema, int $depth): array
+    {
+        $items = is_array($schema['items'] ?? null) ? $schema['items'] : [];
+
+        if ($items === [] || SchemaView::isRecursive($items)) {
+            return [];
+        }
+
+        return [self::fromSchema($items, $depth + 1)];
+    }
+
+    /**
+     * @param  array<string, mixed>  $schema
+     * @return array<string, mixed>
+     */
+    private static function objectExample(array $schema, int $depth): array
+    {
+        $properties = is_array($schema['properties'] ?? null) ? $schema['properties'] : [];
+        $out = [];
+
+        foreach ($properties as $name => $property) {
+            if (! is_string($name) || ! is_array($property)) {
+                continue;
+            }
+
+            if (SchemaView::isRecursive($property)) {
+                continue;
+            }
+
+            $out[$name] = self::fromSchema($property, $depth + 1);
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  array<string, mixed>  $schema
+     */
+    private static function stringExample(array $schema): string
+    {
+        $format = is_string($schema['format'] ?? null) ? $schema['format'] : '';
+
+        return match ($format) {
+            'uuid' => '3fa85f64-5717-4562-b3fc-2c963f66afa6',
+            'date' => '2026-01-31',
+            'date-time' => '2026-01-31T09:00:00Z',
+            'email' => 'user@example.com',
+            'uri', 'url' => 'https://example.com',
+            'password' => '••••••••',
+            default => 'string',
+        };
+    }
+}
